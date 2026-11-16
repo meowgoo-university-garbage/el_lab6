@@ -58,7 +58,7 @@ cooperate.
    message
 3. EC publishes the request, responds with a signed approval message
 4. Voter sends to entry MEC the pile, signed approval message, signs the message
-5. MEC sends to EC confirmation that it has received the approval, MEC publishes
+5. MEC sends to EC confirmation that it has received the approval, EC publishes
    that (associated with its respective #3)
    
    - Unless EC and entry MEC cooperate, vote cannot be denied
