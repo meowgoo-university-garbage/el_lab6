@@ -10,7 +10,7 @@ import "./rsa"
 import "core:crypto/hash"
 
 
-MINOR_EC_COUNT :: 2
+MINOR_EC_COUNT :: 3
 
 Country :: enum {
     Ukraine,
@@ -24,6 +24,11 @@ Person :: struct {
     country : Country,
     age : int,
 
+    rememberedSalts : [dynamic]u64,
+    rememberedEntryMecId : u64,
+    rememberedSteps : u64,
+    rememberedId : u64,
+    rememberedAlreadyFound : bool,
     rememberedViolation : bool,
 
     key_prv : rsa.Key_Private,
@@ -159,7 +164,6 @@ main :: proc () {
 
 
 
-    // TODO: id multiplier thingy
     ec : ElectionCommission = {
         candidates = {
             Candidate{ id = 67, fullname = "Petro Poroshenko", votes = 0 },
@@ -258,14 +262,19 @@ main :: proc () {
 
         entryMec := rand.choice(mecs[:]).id
         steps := cast(u64)rand.int_range(len(mecs) + 2, 5 * len(mecs))
+        p.rememberedEntryMecId = entryMec
+        p.rememberedSteps = steps
 
         startMec := (entryMec + steps - 1) % len(mecs)
         currentMec := startMec
 
         for i := steps; i > 0; i -= 1 {
             steps -= 1
+
             salt := rand.uint64()
-            // TODO: remember
+            salt = rand.uint64_range(0, 100000)
+
+            inject_at(&p.rememberedSalts, 0, salt)
 
             layer : [dynamic]u8
             defer delete(layer)
@@ -279,7 +288,17 @@ main :: proc () {
             bytes, result_encrypt = rsa.encrypt_long(&mecs[currentMec].key_pub, layer[:])
             if currentMec == 0 { currentMec = len(mecs) }
             currentMec -= 1
+
+            if rand.float32() < 0.05 {
+                fmt.printfln("VIOLATION: I AM STUUUUUPID")
+                replacement : []u8 = { 0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67, 0x67 }
+                bytes = slice.clone(replacement)
+            }
         }
+
+        fmt.printfln("\tID: %v", id)
+        fmt.printfln("\tSalts: %v", p.rememberedSalts)
+        fmt.printfln("\tEntry MEC: %v", p.rememberedEntryMecId)
 
 
         request := Begin_AcquireVoteRequest{
@@ -434,8 +453,9 @@ main :: proc () {
 
     fmt.printfln("PROCESSING VOTES")
 
+    finalBallots : [dynamic]Ballot
     for day in 0 ..< 9999999 {
-        fmt.printfln("DAY %v", day)
+        fmt.printfln("============DAY %v", day)
         isThereWorkToDo := false
 
         for &mec in mecs {
@@ -455,14 +475,17 @@ main :: proc () {
         if !isThereWorkToDo { break }
 
         for &mec in mecs {
+            fmt.printfln("MEC #%v", mec.id)
             nextMecIndex := mec.id + 1
             if nextMecIndex == len(mecs) { nextMecIndex = 0 }
             nextMec := &mecs[nextMecIndex]
 
             for p in mec.piles {
+                append(&mec.published_hash_pre, hash.hash_bytes(.SHA256, p))
+
                 uncovered, result_decrypt := rsa.decrypt_long(&mec.key_prv, p)
                 if !result_decrypt || len(uncovered) < 8 { 
-                    fmt.printfln("decrypt failed")
+                    fmt.printfln("\tDecryption failed, possibly finalized ballot")
                     delete(uncovered)
                     append(&mec.published_final, p)
                     continue
@@ -475,8 +498,20 @@ main :: proc () {
                 uncovered = uncovered[size_of(u64):]
 
                 append(&mec.published_salt, salt)
-                append(&nextMec.pileQueue, uncovered)
+                append(&mec.published_hash_post, hash.hash_bytes(.SHA256, uncovered))
+
+                if rand.float32() < 0.01 {
+                    fmt.printfln("VIOLATION: !!!!! I AM EVILLLL")
+                }
+                else {
+                    append(&nextMec.pileQueue, uncovered)
+                }
             }
+
+            rand.shuffle(mec.published_salt[:])
+            rand.shuffle(mec.published_hash_post[:])
+
+            fmt.printfln("\tPUB Salt: %v", mec.published_salt[:])
         }
 
         finalPiles : [dynamic][]u8
@@ -488,18 +523,44 @@ main :: proc () {
             }
         }
 
+        fmt.printfln("EC")
         for p in finalPiles {
             uncovered, result_decrypt := rsa.decrypt_value(&ec.key_prv, p, Ballot)
             if !result_decrypt {
-                fmt.printfln("okay this wasnt actually a ballot")
+                fmt.printfln("\tokay this wasnt actually a ballot")
                 continue
             }
 
-            fmt.printfln("Uncovered ballot %v", uncovered)
-
             ci, cf := findCandidate(uncovered.candidate_id, ec.candidates)
-            fmt.printfln("%v", ec.candidates[ci].fullname)
+            fmt.printfln("\tUncovered ballot %v %v", uncovered, ec.candidates[ci].fullname)
+
             ec.candidates[ci].votes += 1
+            append(&finalBallots, uncovered)
+        }
+
+
+
+        for &mec in mecs {
+            ingoing := len(mec.published_hash_pre)
+            outgoing := len(mec.published_hash_post) + len(mec.published_final)
+            nextMec := mecs[(mec.id + 1) % len(mecs)]
+
+            if ingoing != outgoing || len(mec.published_hash_post) != len(mec.published_salt) || len(nextMec.pileQueue) != len(mec.published_hash_post) {
+                fmt.printfln("SOMETHING FISHY WITH MEC %v", mec.id)
+            }
+        }
+
+
+        for &p in people {
+            if cast(u64)day >= p.rememberedSteps { continue }
+
+            salt := p.rememberedSalts[day]
+            mec := mecs[(p.rememberedEntryMecId + cast(u64)day) % len(mecs)]
+
+            _, found := slice.linear_search(mec.published_salt[:], salt)
+            if !found {
+                fmt.printfln("%v: DIDNT FIND MY SAAAAAALT", p.fullname)
+            }
         }
     }
     fmt.println()
@@ -508,5 +569,12 @@ main :: proc () {
 
     for c in ec.candidates {
         fmt.printfln("Candidate %v : %v votes", c.fullname, c.votes)
+    }
+    fmt.println()
+
+    fmt.printfln("LIST OF BALLOTS")
+    for b in finalBallots {
+        ci, cf := findCandidate(b.candidate_id, ec.candidates)
+        fmt.printfln("Ballot for %v | ID : %v", ec.candidates[ci].fullname, b.id)
     }
 }
