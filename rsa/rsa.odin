@@ -139,6 +139,8 @@ decrypt_long :: proc (key : ^Key_Private, cipher : []u8) -> (data : []u8, ok : b
         cipher = cipher[segmentLength:]
 
         temp := decrypt(key, segment) or_return
+        defer delete(temp)
+
         append(&datad, ..temp)
     }
 

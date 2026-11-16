@@ -9,6 +9,9 @@ import "core:math/big"
 import "./rsa"
 import "core:crypto/hash"
 
+
+MINOR_EC_COUNT :: 2
+
 Country :: enum {
     Ukraine,
     Russia,
@@ -110,8 +113,8 @@ MinorElectionCommission :: struct {
     voters : [dynamic]VoterSingle,
 
     pileQueue : [dynamic][]u8,
+    piles     : [dynamic][]u8,
 
-    receivedPiles : [dynamic][]u8,
     published_final     : [dynamic][]u8,
     published_salt      : [dynamic]u64,
     published_hash_pre  : [dynamic][]u8,
@@ -128,7 +131,6 @@ Ballot :: struct {
 
 
 
-MINOR_EC_COUNT :: 3
 
 
 u8arr_from_u64 :: proc (s : u64) -> (r : [8]u8) {
@@ -144,10 +146,7 @@ main :: proc () {
         Person{ id = 1, fullname = "Svitlana Zhizha", country = .Ukraine, age = 27 },
         Person{ id = 2, fullname = "Zheka Zrada", country = .Ukraine, age = 19 },
         Person{ id = 3, fullname = "Grzegorz Brzeczyszczykiewicz", country = .Ukraine, age = 153 },
-        // Person{ id = 4, fullname = "little boy", country = .Ukraine, age = 4 },
         Person{ id = 5, fullname = "Yaroslav Aboba", country = .Ukraine, age = 34 },
-        // Person{ id = 6, fullname = "Vova Ugabuga", country = .Ukraine, age = 7182 },
-        // Person{ id = 7, fullname = "Mariya Kavun", country = .Ukraine, age = 26 },
     }
 
 
@@ -183,7 +182,7 @@ main :: proc () {
     mecs : [MINOR_EC_COUNT]MinorElectionCommission
     for &mec, i in mecs {
         mec.id = cast(u64)i
-        mec.key_prv, ec.key_pub = rsa.keygen()
+        mec.key_prv, mec.key_pub = rsa.keygen()
         fmt.printfln("Generated private key for MINOR ELECTION COMMISSION #%v", i)
     }
     fmt.println()
@@ -231,6 +230,18 @@ main :: proc () {
         return
     }
 
+    findCandidate :: proc (id : u64, cs : []Candidate) -> (ci : u64, cf : bool) {
+        id := id
+        context.user_ptr = &id
+        cii : int
+        cii, cf = slice.linear_search_proc(cs, proc (c : Candidate) -> bool {
+            return (c.id == (cast(^u64)context.user_ptr)^)
+        })
+        ci = cast(u64)cii
+
+        return
+    }
+
     fmt.printfln("VOTING STARTED")
     for &p in people {
         candidate := rand.choice(ec.candidates)
@@ -246,7 +257,7 @@ main :: proc () {
         bytes := final
 
         entryMec := rand.choice(mecs[:]).id
-        steps := cast(u64)rand.int_range(len(mecs) + 2, 3 * len(mecs))
+        steps := cast(u64)rand.int_range(len(mecs) + 2, 5 * len(mecs))
 
         startMec := (entryMec + steps - 1) % len(mecs)
         currentMec := startMec
@@ -423,12 +434,79 @@ main :: proc () {
 
     fmt.printfln("PROCESSING VOTES")
 
-    anyWorkDone := true
     for day in 0 ..< 9999999 {
-        if !anyWorkDone { break }
-        anyWorkDone = false
+        fmt.printfln("DAY %v", day)
+        isThereWorkToDo := false
+
+        for &mec in mecs {
+            clear(&mec.piles)
+            for p in mec.pileQueue {
+                append(&mec.piles, p)
+                isThereWorkToDo = true
+            }
+            clear(&mec.pileQueue)
+
+            clear(&mec.published_salt)
+            clear(&mec.published_final)
+            clear(&mec.published_hash_pre)
+            clear(&mec.published_hash_post)
+        }
+
+        if !isThereWorkToDo { break }
+
+        for &mec in mecs {
+            nextMecIndex := mec.id + 1
+            if nextMecIndex == len(mecs) { nextMecIndex = 0 }
+            nextMec := &mecs[nextMecIndex]
+
+            for p in mec.piles {
+                uncovered, result_decrypt := rsa.decrypt_long(&mec.key_prv, p)
+                if !result_decrypt || len(uncovered) < 8 { 
+                    fmt.printfln("decrypt failed")
+                    delete(uncovered)
+                    append(&mec.published_final, p)
+                    continue
+                }
+
+                // NOTE: for some bizarre reason this segfaults????
+                // delete(p)
+
+                salt := (cast(^u64)raw_data(uncovered))^
+                uncovered = uncovered[size_of(u64):]
+
+                append(&mec.published_salt, salt)
+                append(&nextMec.pileQueue, uncovered)
+            }
+        }
+
+        finalPiles : [dynamic][]u8
+        defer delete(finalPiles)
+
+        for &mec in mecs {
+            for p in mec.published_final {
+                append(&finalPiles, p)
+            }
+        }
+
+        for p in finalPiles {
+            uncovered, result_decrypt := rsa.decrypt_value(&ec.key_prv, p, Ballot)
+            if !result_decrypt {
+                fmt.printfln("okay this wasnt actually a ballot")
+                continue
+            }
+
+            fmt.printfln("Uncovered ballot %v", uncovered)
+
+            ci, cf := findCandidate(uncovered.candidate_id, ec.candidates)
+            fmt.printfln("%v", ec.candidates[ci].fullname)
+            ec.candidates[ci].votes += 1
+        }
     }
     fmt.println()
 
     fmt.printfln("PUBLISHING VOTES")
+
+    for c in ec.candidates {
+        fmt.printfln("Candidate %v : %v votes", c.fullname, c.votes)
+    }
 }
