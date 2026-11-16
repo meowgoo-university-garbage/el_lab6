@@ -1,5 +1,6 @@
 package rsa
 
+import "core:math"
 import "core:fmt"
 import "core:slice"
 import "core:mem"
@@ -9,7 +10,7 @@ import "core:math/rand"
 import "core:crypto/hash"
 
 PAD :: 0xac
-MAX_LEN :: 253 // NOTE: just to be safe
+MAX_LEN :: 250 // NOTE: just to be safe
 FIXED_EXPONENT :: 65337
 
 Key_Public :: struct {
@@ -73,13 +74,13 @@ internal_powmod :: proc (input : []u8, pow : ^big.Int, mod : ^big.Int) -> (resul
 }
 
 encrypt :: proc (key : ^Key_Public, data : []u8) -> (cipher : []u8, ok : bool) {
-    (len(data) < MAX_LEN) or_return
+    (len(data) <= MAX_LEN) or_return
 
     mdata : [dynamic]u8
     defer delete(mdata)
 
-    // append(&mdata, PAD)
-    // append(&mdata, cast(u8)len(data))
+    append(&mdata, PAD)
+    append(&mdata, cast(u8)len(data))
     append(&mdata, ..data)
 
     return internal_powmod(mdata[:], &key.e, &key.n), true
@@ -87,17 +88,61 @@ encrypt :: proc (key : ^Key_Public, data : []u8) -> (cipher : []u8, ok : bool) {
 
 decrypt :: proc (key : ^Key_Private, cipher : []u8) -> (data : []u8, ok : bool = true) {
     mdata := internal_powmod(cipher, &key.d, &key.n)
-    // defer delete(mdata)
+    defer delete(mdata)
 
-    // (len(mdata) >= 2)       or_return
-    // (mdata[0] == PAD)       or_return
-    // (mdata[1] < MAX_LEN)    or_return
+    (len(mdata) >= 2)       or_return
+    (mdata[0] == PAD)       or_return
+    (mdata[1] <= MAX_LEN)    or_return
 
-    // data = make([]u8, mdata[1])
-    // mem.copy(raw_data(data), raw_data(mdata[2:]), len(mdata) - 2)
-    data = mdata
+    data = make([]u8, mdata[1])
+    mem.copy(raw_data(data), raw_data(mdata[2:]), len(mdata) - 2)
+    // data = mdata
 
     return
+}
+
+encrypt_long :: proc (key : ^Key_Public, data : []u8) -> (cipher : []u8, ok : bool) {
+    // NOTE: in principle this is just encrypting number 0, but im lazy
+    (len(data) > 0) or_return
+    data := data
+
+    cipherd : [dynamic]u8
+
+    for len(data) > 0 {
+        l := math.min(MAX_LEN, len(data))
+        segment := data[0:l]
+        data = data[l:]
+
+        temp := encrypt(key, segment) or_return
+        defer delete(temp)
+
+        append(&cipherd, cast(u8)(len(temp) - 1))
+        append(&cipherd, ..temp)
+    }
+
+    return cipherd[:], true
+}
+
+decrypt_long :: proc (key : ^Key_Private, cipher : []u8) -> (data : []u8, ok : bool) {
+    (len(cipher) > 0) or_return
+    cipher := cipher
+
+    datad : [dynamic]u8
+
+    for len(cipher) > 0 {
+        segmentLength := (cast(int)cipher[0]) + 1
+        cipher = cipher[1:]
+
+        (len(cipher) >= segmentLength) or_return
+
+        segment := cipher[:segmentLength]
+        cipher = cipher[segmentLength:]
+
+        temp := decrypt(key, segment) or_return
+        append(&datad, ..temp)
+    }
+
+    return datad[:], true
 }
 
 encrypt_value :: proc (key : ^Key_Public, value : $ty) -> (cipher : []u8, ok : bool) {
